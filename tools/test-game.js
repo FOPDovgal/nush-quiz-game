@@ -76,5 +76,12 @@ ok(post(Object.assign({}, good, { attemptId: "z2", score: "11" })).ok === false,
 ok(post(Object.assign({}, good, { attemptId: "z3", studentName: "x".repeat(500) })).ok === false, "Code.gs: задовге ПІБ → ok:false");
 ok(post("not json").ok === false, "Code.gs: не JSON → ok:false");
 
+// 6. Мінімізація даних учня: лише прізвище або нікнейм (Code.gs приймає studentName від 3 символів)
+ok(/<label for="fName">Прізвище або нікнейм \*<\/label>/.test(html), "форма: поле «Прізвище або нікнейм»");
+ok(!/по батькові|ПІБ/.test(html), "гра не просить ПІБ / по батькові");
+ok(/\[\.\.\.name\]\.length<3/.test(html), "форма: мінімум 3 символи, як у Code.gs");
+for (const nick of ["Кіт", "Коваленко", "neo_11"])
+  ok(post(Object.assign({}, good, { attemptId: "nick-" + nick, studentName: nick })).ok === true, `Code.gs приймає прізвище/нікнейм «${nick}»`);
+
 console.log(`\n${checks - fails}/${checks} перевірок пройдено`);
 process.exit(fails ? 1 : 0);
