@@ -1,63 +1,98 @@
 /**
- * НУШ Тести-гра — приймач результатів.
- * Записує кожну спробу в аркуш «Результати» цієї Google Таблиці і надсилає лист учителю.
- * Встановлення — див. README.md поруч.
+ * НУШ Тести-гра — приймач результатів (Google Apps Script, веб-застосунок).
+ * Кожна спроба → рядок в аркуші «Результати» цієї Таблиці + лист власнику скрипта.
+ * Відповідь: JSON {ok:true} або {ok:false, error:"..."}. Встановлення — README.md поруч.
  */
-var TEACHER_EMAIL = '';          // email учителя; порожньо = лист на адресу власника скрипта
 var SHEET_NAME = 'Результати';
-var HEADERS = ['Отримано', 'ПІБ', 'Email учня', 'Клас', 'Бал', 'Шкала', 'Відсоток', 'Правильно', 'Усього',
-  'Час (с)', 'Початок', 'Завершення', 'Тест', 'Предмет', 'Клас (програма)', 'Тема', 'Слабкі теми', 'Відповіді', 'ID спроби'];
+var HEADERS = ['Дата/час', 'ПІБ', 'Email', 'Клас', 'Предмет', 'Тема', 'Правильні', 'Всього', '%', 'Оцінка', 'maxScore',
+  'Тривалість (хв:с)', 'Номер спроби', 'Розділ 1', 'Розділ 2', 'Розділ 3', 'Розділ 4', 'Слабкі теми',
+  'Відповіді (id: відповідь: ✓/✗)', 'ID спроби', 'Гра', 'Клас програми'];
 
 function doPost(e) {
   var lock = LockService.getScriptLock();
+  var locked = false;
   try {
-    var d = JSON.parse(e.postData.contents);
-    var s = function (v, max) { return String(v == null ? '' : v).replace(/^[=+\-@]/, "'$&").slice(0, max || 200); };
-    if (!d.studentName || !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(String(d.studentEmail))) return out({ ok: false, error: 'bad input' });
+    if (!e || !e.postData || !e.postData.contents) return out_({ ok: false, error: 'empty body' });
+    if (e.postData.contents.length > 50000) return out_({ ok: false, error: 'body too large' });
+    var d;
+    try { d = JSON.parse(e.postData.contents); } catch (x) { return out_({ ok: false, error: 'bad json' }); }
 
-    lock.waitLock(20000);
+    // --- валідація типів і довжин ---
+    var err = [];
+    var str = function (k, min, max) { var v = d[k]; if (typeof v !== 'string' || v.trim().length < min || v.length > max) err.push(k); return typeof v === 'string' ? v.trim() : ''; };
+    var num = function (k, min, max) { var v = d[k]; if (typeof v !== 'number' || !isFinite(v) || v < min || v > max) err.push(k); return v; };
+    var name = str('studentName', 3, 120), email = str('studentEmail', 5, 120), group = str('studentGroup', 0, 40);
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) err.push('studentEmail');
+    var subject = str('subject', 1, 60), topic = str('topic', 1, 120), title = str('gameTitle', 1, 120);
+    var attemptId = str('attemptId', 4, 60);
+    var correct = num('correct', 0, 500), total = num('total', 1, 500), percent = num('percent', 0, 100);
+    var maxScore = num('maxScore', 10, 12), score = num('score', 1, 12), dur = num('durationSec', 0, 864000);
+    var attemptNo = num('attemptNo', 1, 1000), grade = num('grade', 1, 12);
+    if (maxScore !== 10 && maxScore !== 12) err.push('maxScore');
+    if (correct > total || score > maxScore) err.push('consistency');
+    var secs = ['section1', 'section2', 'section3', 'section4'].map(function (k) { return str(k, 3, 9); });
+    var weak = str('weakTopics', 0, 2000), answers = str('answers', 0, 8000);
+    if (err.length) return out_({ ok: false, error: 'invalid: ' + err.join(',') });
+
+    lock.waitLock(20000); locked = true;
     var cache = CacheService.getScriptCache();
-    var key = 'att_' + s(d.attemptId, 60);
-    if (cache.get(key)) return out({ ok: true, duplicate: true });
+    var key = 'att_' + attemptId;
+    if (cache.get(key)) return out_({ ok: true, duplicate: true });   // повторне надсилання тієї ж спроби
 
     var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var sh = ss.getSheetByName(SHEET_NAME) || ss.insertSheet(SHEET_NAME);
-    if (sh.getLastRow() === 0) { sh.appendRow(HEADERS); sh.setFrozenRows(1); }
-    var n = function (v) { var x = Number(v); return isFinite(x) ? x : ''; };
-    sh.appendRow([new Date(), s(d.studentName, 120), s(d.studentEmail, 120), s(d.studentGroup, 40),
-      n(d.score), n(d.maxScore), n(d.percent), n(d.correct), n(d.total), n(d.durationSec),
-      s(d.startedAt, 40), s(d.finishedAt, 40), s(d.gameTitle), s(d.subject), n(d.grade), s(d.topic),
-      s(d.weakTopics, 2000), s(d.answers, 3000), s(d.attemptId, 60)]);
+    var sh = sheet_(ss);
+    var mmss = Math.floor(dur / 60) + ':' + ('0' + Math.round(dur % 60)).slice(-2);
+    sh.appendRow([new Date(), safe_(name), safe_(email), safe_(group), safe_(subject), safe_(topic),
+      correct, total, percent, score, maxScore, safe_(mmss), attemptNo,
+      safe_(secs[0]), safe_(secs[1]), safe_(secs[2]), safe_(secs[3]), safe_(weak), safe_(answers),
+      safe_(attemptId), safe_(title), grade]);
     cache.put(key, '1', 21600);
-    lock.releaseLock();
+    lock.releaseLock(); locked = false;
 
-    var to = TEACHER_EMAIL || Session.getEffectiveUser().getEmail();
-    MailApp.sendEmail(to,
-      'Результат: ' + s(d.gameTitle) + ' — ' + s(d.studentName, 120) + ' — ' + n(d.score) + '/' + n(d.maxScore),
-      'Учень: ' + s(d.studentName, 120) + '\nEmail: ' + s(d.studentEmail, 120) + '\nКлас: ' + s(d.studentGroup, 40) +
-      '\nТест: ' + s(d.gameTitle) + ' (' + s(d.subject) + ', ' + n(d.grade) + ' кл., ' + s(d.topic) + ')' +
-      '\nБал: ' + n(d.score) + ' з ' + n(d.maxScore) +
-      '\nПравильно: ' + n(d.correct) + ' з ' + n(d.total) + ' (' + n(d.percent) + '%)' +
-      '\nЧас: ' + Math.round(n(d.durationSec) / 60) + ' хв' +
-      '\nСлабкі теми: ' + (s(d.weakTopics, 2000) || '—') +
-      '\n\nУсі результати: ' + ss.getUrl());
-    return out({ ok: true });
-  } catch (err) {
-    try { lock.releaseLock(); } catch (e2) {}
-    return out({ ok: false, error: String(err).slice(0, 200) });
+    try {
+      MailApp.sendEmail(Session.getEffectiveUser().getEmail(),
+        '[Гра] ' + name + ' — оцінка ' + score + '/' + maxScore,
+        'Учень: ' + name + '\nEmail: ' + email + '\nКлас: ' + (group || '—') +
+        '\nГра: ' + title + ' (' + subject + ', ' + grade + ' кл., ' + topic + ')' +
+        '\nСпроба №' + attemptNo + '\nОцінка: ' + score + ' з ' + maxScore +
+        '\nПравильно: ' + correct + ' з ' + total + ' (' + percent + '%)' +
+        '\nТривалість: ' + mmss +
+        '\nРозділи: ' + secs.join(' | ') +
+        '\nТеми для повторення: ' + (weak || '—') +
+        '\n\nТаблиця з усіма результатами: ' + ss.getUrl());
+    } catch (mailErr) { /* рядок уже записано; ліміт пошти не має зривати збереження */ }
+    return out_({ ok: true });
+  } catch (ex) {
+    return out_({ ok: false, error: String(ex).slice(0, 200) });
+  } finally {
+    if (locked) try { lock.releaseLock(); } catch (x) {}
   }
 }
 
-function doGet() { return out({ ok: true, service: 'nush-quiz-game results' }); }
+function doGet() { return out_({ ok: true, service: 'nush-quiz-game results' }); }
 
-function out(obj) {
+/** Екранування: рядки, що починаються з = + - @, і дроби на кшталт 3/4 зберігаються як текст. */
+function safe_(v) {
+  v = String(v == null ? '' : v);
+  return /^[=+\-@]/.test(v) || /^\d+\/\d+$/.test(v) || /^\d+:\d+$/.test(v) ? "'" + v : v;
+}
+
+function sheet_(ss) {
+  var sh = ss.getSheetByName(SHEET_NAME) || ss.insertSheet(SHEET_NAME);
+  // аркуш від попередньої версії скрипта з іншими стовпцями — не змішуємо, пишемо в новий
+  if (sh.getLastRow() > 0 && sh.getRange(1, 1).getValue() !== HEADERS[0]) {
+    sh = ss.getSheetByName(SHEET_NAME + ' v2') || ss.insertSheet(SHEET_NAME + ' v2');
+  }
+  if (sh.getLastRow() === 0) { sh.appendRow(HEADERS); sh.setFrozenRows(1); sh.getRange(1, 1, 1, HEADERS.length).setFontWeight('bold'); }
+  return sh;
+}
+
+function out_(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
 }
 
-/** Запустіть один раз вручну з редактора, щоб надати дозволи (Таблиця + пошта). */
+/** Запустіть один раз вручну з редактора, щоб надати дозволи (Таблиця + пошта) і створити аркуш. */
 function setup() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sh = ss.getSheetByName(SHEET_NAME) || ss.insertSheet(SHEET_NAME);
-  if (sh.getLastRow() === 0) { sh.appendRow(HEADERS); sh.setFrozenRows(1); }
+  sheet_(SpreadsheetApp.getActiveSpreadsheet());
   MailApp.getRemainingDailyQuota();
 }
